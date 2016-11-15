@@ -1,0 +1,199 @@
+---
+title: "Mapping Shootings in Baltimore"
+author: "Jacob Fiksel"
+date: "October 19, 2016"
+output: html_document
+---
+
+The purpose of this document is to show you how to download, clean, and visualize geographic data in R. It's totally fine for you not to understand most, or even all, of the code of the document. However, you should gain an appreciation for how powerful of a tool R can be for completing a full data analysis. 
+
+Let's get started. First, make sure this is saved in your class folder. There are also several packages that you probably do not have yet. Run the following block of code (or any of the lines which contain packages you do not yet have) to install these packages. I don't have this in an R code chunk so that it doesn't automatically run when you compile this document.
+
+install.packages('jsonlite')
+
+install.packages('rgdal')
+
+install.packages('ggplot2')
+
+install.packages('ggmap')
+
+install.packages('downloader')
+
+install.packages('dplyr')
+
+install.packages('sp')
+
+install.packages('maptools')
+
+install.packages('plyr')
+
+install.packages('curl')
+
+
+There are two items that we would like to visualize together. First, life expectancies at the Community Statistical Area level in Baltimore. Second, the locations of all shootings that have occured in Baltimore from 2014-present. Let's first get life expectancy data. (OpenBaltimore)[https://data.baltimorecity.gov] has lots of publicily available data. The data for life expectancy is (here)[https://data.baltimorecity.gov/Neighborhoods/Children-and-Family-Health-Well-Being-2010-2014-/rtbq-mnni]. 
+
+But how are we going to download this to R? One option is to click export, download as a CSV, then read the data into R. But there is another option, which is to use an API. APIs are a way for programs like R to grab data from the internet without having a human do any pointing and clicking (at least this is my understanding of APIs). Note when you click export, there is a tab named 'SODA API'. Clicking on this tab, we then get the link to use for the API under the header 'API Endpoint'. We will then use the R package jsonlite to download the data direcly into R.
+
+```{r}
+library(jsonlite)
+well_being <- fromJSON("https://data.baltimorecity.gov/resource/ivtw-hiv6.json")
+### What kind of data is this?
+class(well_being)
+### What does this data look like?
+head(well_being)
+```
+
+It looks like there are lots of variables, for lots of different years. The two important ones for us are the csa name (csa2010) and life expectancy (let's use 2014, since it's the most recent--lifeexp14). I'm going to use the dplyr package, which is very useful for data cleaning, to select this columns. I'm also going to put plyr in our library, because if you load it after dplyr it can cause some issues.
+```{r}
+library(plyr)
+library(dplyr)
+well_being <- select(well_being, csa2010, lifeexp14)
+### Use ?select to learn more about this function
+```
+
+Awesome! Now let's look at the coordinates of shootings in Baltimore from 2014-present. Data on the locations of all victim based crimes are available (here)[https://data.baltimorecity.gov/Public-Safety/BPD-Part-1-Victim-Based-Crime-Data/wsfq-mvij]. We're going to use jsonlite again to get this data into R
+
+```{r}
+victim_crime <- fromJSON("https://data.baltimorecity.gov/resource/4ih5-d5d5.json")
+head(victim_crime)
+### Let's look at the type of variable each column contains
+### Note one of the columns is a data frame!
+str(victim_crime)
+```
+
+Looks like a messy data set! There are crimes in addition to shootings, the location coordinates are in a data frame, and the date is a character variable. Let's clean this up.
+
+```{r}
+### Start with getting the year out of the coordinates
+coordinates <- victim_crime$location_1$coordinates
+head(coordinates)
+#### The coordinates are now a list
+### Each item in the list contains the longitude first, then latitude
+#### sapply goes through each element in the list and performs the function
+### for example, this code says go through each element in the list coordinates
+### and for each element, x, tell me if it's null (is.null) or not
+isnull <- sapply(coordinates, function(element) is.null(element))
+### Keep elements only with a known location
+victim_crime <- victim_crime[!isnull,]
+### this line says for each element in the list coordinates, call this item x.
+### now the function on x is to return the first element (longitude)
+victim_crime$longitude <- unlist(sapply(coordinates, function(x) x[1]))
+### same, except now the second element
+victim_crime$latitude <- unlist(sapply(coordinates, function(x) x[2]))
+### select only date, description, latitude and longitude
+victim_crime <- select(victim_crime, crimedate, description, longitude, latitude)
+### Remember crime date is a character
+### We're going to use substr to grab the first four elements of all the dates,
+### which is the year. We're also going to make the year an integer
+year <- as.integer(substr(victim_crime$crimedate,1,4))
+### get rid of crime date
+victim_crime$crimedate <- NULL
+victim_crime$year <- year
+#### make all descriptions lower case
+victim_crime$description <- tolower(victim_crime$description)
+### use the dplyr function filter to subset
+### ?filter to learn more
+shooting_coords <- filter(victim_crime, (year==2016|year==2015|year==2014) & description=="shooting")
+### Note I had to use parenthesis around the multiple 'or' arguments
+### Let's check to make sure we have what we want
+head(shooting_coords)
+### and finally only select the coordinates
+shooting_coords <- select(shooting_coords, longitude, latitude)
+```
+
+That was lots of work, but now we have shooting coordinates of shootings, and life expectancies for CSAs!! Now we have to think about mapping. We want something similar to (this image)[https://fusiondotnet.files.wordpress.com/2015/04/screen-shot-2015-04-29-at-10-42-53-am1.png?w=625], but with point locations of shootings over it. We need to find information on the shapes of the CSAs, so that we can fill them in with our map. Luckily, R can import this type of information, which is usually contained in shape files. Don't worry too much about the following block of code. I simply googled 'shapefiles baltimore csa' and ended up (here)[http://bniajfi.org/mapping-resources/]. I then extracted the link by right clicking on 'Community Statistical Areas (2010)' and copying the link. I then download the file, which is a .zip, unzip it, then read it back into R. I found the readOGR function by googling how to read shape files into R.
+```{r}
+library(rgdal)
+library(downloader)
+library(sp)
+url <- 'http://bniajfi.org/wp-content/uploads/2014/04/csa_2010_boundaries.zip'
+dir.create('csa_data')
+download(url, dest=file.path('csa_data','shapes.zip'))
+unzip(file.path('csa_data', 'shapes.zip'),
+      exdir=file.path('csa_data'))
+csa <- readOGR("csa_data", "CSA_NSA_Tracts")
+
+# What's the output
+class(csa)
+```
+
+Whoah, a SpatialPolygonsDataFrame?? What's that? I don't really know, but I found out through extensive googling--feel free to do so yourself if you're interested. We can investigate this by using csa@data. Note we use the @ instead of the $ with this type of data.
+
+```{r}
+### The data is itself a data frame
+class(csa@data)
+head(csa@data)
+### Investgiate the CSA names
+csa@data$Community
+### Note that one is jail--let's take this out
+
+csa <- csa[-51,]
+csa@data <- droplevels(csa@data)
+```
+
+Now let's look into the what makes this a SpatialPolygonsDataFrame--the polygons. I'm going to use the 4th element, because it's relatively small
+```{r}
+csa[4,]@polygons
+```
+
+What's up with those coordinates? It turns out that you have to do something to turn them into latitude and longitude. This was also done with the help of googling
+```{r}
+### CSA coordinates to latitude and longitude
+library(sp)
+llprj <-  "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs +towgs84=0,0,0"
+csa <- spTransform(csa,  llprj)
+csa[4,]@polygons
+```
+
+Cool! We're almost there. Now let's assign the life expectancies we downloaded earlier to the CSAs.
+```{r}
+### Match the CSA names between the two data frames
+key <- na.omit(match(csa@data$Community, well_being$csa))
+### Assign life expectancy
+csa@data$life_expectancy <- as.numeric(well_being$lifeexp14[key])
+```
+
+Finally, let's map this stuff! We're going to use ggmap and ggplot2, which I think you will be learning at some point this semester (ggplot2, not ggmap). Let's first just show how to get a map of Baltimore up using ggmap
+
+```{r}
+library(ggmap)
+library(ggplot2)
+myggmap <- get_map(location="Baltimore", zoom=12)
+ggmap(myggmap) + xlab("Longitude") + ylab("Latitude")
+```
+
+Cool! Now we want to overlay the CSA boundaries. I'm going to use some code to get the SpatialPolgyonsDataFrame Polygons to a data frame that can be used in plotting--don't worry about this.
+
+```{r}
+library(maptools)
+csa@data$id <- csa@data$Community
+csa.points <- fortify(csa, region="id")
+csa.df <- join(csa.points, csa@data, by="id")
+
+ggmap(myggmap)+ 
+  xlab("Longitude") + ylab("Latitude")+
+  geom_path(data=csa.df, aes(x=long, y=lat, group=group), color="black")
+```
+
+And fill by life expectancy
+```{r}
+ggmap(myggmap)+ 
+  xlab("Longitude") + ylab("Latitude")+
+  geom_path(data=csa.df, aes(x=long, y=lat, group=group), color="black")+
+  geom_polygon(data=csa.df, aes(x=long, y=lat, group=group, fill=life_expectancy), alpha=.4) +
+  scale_fill_gradientn("Life expectancy", colors=c('red', 'yellow', 'green'))
+```
+
+Can you figure out what each of the lines does? Try experimenting with the alpha argument in geompolygon. Try running the code above without the final line (scalefill_gradient(...)). What happens? Finally, let's add points for the shootings
+
+```{r}
+ggmap(myggmap)+ 
+  xlab("Longitude") + ylab("Latitude")+
+  geom_path(data=csa.df, aes(x=long, y=lat, group=group), color="black")+
+  geom_polygon(data=csa.df, aes(x=long, y=lat, group=group, fill=life_expectancy), alpha=.4) +
+  scale_fill_gradientn("Life expectancy", colors=c('red', 'yellow', 'green')) +
+  geom_point(data=shooting_coords, aes(x=longitude, y=latitude), alpha=.5) +
+  ggtitle("Baltimore Life Expectancy and Shootings 2014-Present")
+```
+
+I hope this was fun, if not useful, for you. Feel free to email me at jfiksel@gmail.com if you have any questions about this, or are interested in doing more advanced R things! 
